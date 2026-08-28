@@ -188,56 +188,114 @@ async function processComment(value, env) {
   const text = String(value?.text || "");
   const username = String(value?.from?.username || "");
   const commenterIgsid = String(value?.from?.id || "");
-  if (!commentId || !mediaId) return;
 
+  console.log("COMMENT WEBHOOK RECEIVED", {
+    commentId,
+    mediaId,
+    username,
+    text,
+    commenterIgsid
+  });
+
+  if (!commentId || !mediaId) {
+    console.warn("COMMENT IGNORED: missing commentId or mediaId", JSON.stringify(value));
+    return;
+  }
+
+  // 같은 프로페셔널 계정이 자기 게시물에 단 댓글은 제외합니다.
+  // 팔로워/비팔로워 여부는 여기서 검사하지 않습니다.
   const own = await getOwnAccount(env).catch(() => null);
-  if (own && commenterIgsid && commenterIgsid === String(own.user_id)) return;
-  if (own && username && username.toLowerCase() === String(own.username || "").toLowerCase()) return;
+  if (own && commenterIgsid && commenterIgsid === String(own.user_id)) {
+    console.log("COMMENT IGNORED: self comment", { commentId, username });
+    return;
+  }
+  if (own && username && username.toLowerCase() === String(own.username || "").toLowerCase()) {
+    console.log("COMMENT IGNORED: self username", { commentId, username });
+    return;
+  }
 
   const eventKey = `comment:${commentId}`;
-  const insert = await env.DB.prepare("INSERT OR IGNORE INTO event_logs(event_key,username,media_id,status,detail,created_at) VALUES(?,?,?,'received',?,datetime('now'))")
-    .bind(eventKey, username, mediaId, text.slice(0, 500)).run();
-  if (!insert.meta?.changes) return;
 
-  const { results } = await env.DB.prepare("SELECT * FROM campaigns WHERE active=1 AND (media_id=? OR media_id='*') ORDER BY id DESC").bind(mediaId).all();
+  // Meta가 같은 Webhook을 재전송해도 같은 댓글에는 DM을 중복 발송하지 않습니다.
+  const insert = await env.DB.prepare(
+    "INSERT OR IGNORE INTO event_logs(event_key,username,media_id,status,detail,created_at) VALUES(?,?,?,'received',?,datetime('now'))"
+  ).bind(eventKey, username, mediaId, text.slice(0, 500)).run();
+
+  if (!insert.meta?.changes) {
+    console.log("COMMENT IGNORED: duplicate webhook", { commentId });
+    return;
+  }
+
+  // 선택한 릴스/게시물 또는 * 전체 게시물 자동화를 찾습니다.
+  const { results } = await env.DB.prepare(
+    "SELECT * FROM campaigns WHERE active=1 AND (media_id=? OR media_id='*') ORDER BY id DESC"
+  ).bind(mediaId).all();
+
   const campaignRaw = results.find((row) => campaignMatches(row, text));
-  if (!campaignRaw) { await updateLog(env, eventKey, "ignored", "no campaign matched"); return; }
+
+  if (!campaignRaw) {
+    await updateLog(env, eventKey, "ignored", `no campaign matched / comment=${text}`);
+    console.log("COMMENT IGNORED: no campaign matched", { mediaId, text });
+    return;
+  }
+
   const campaign = normalizeCampaign(campaignRaw);
 
   try {
-    if (!campaign.require_follow) {
-      const sent = await sendResourcePrivateReply(env, commentId, campaign);
+    // 핵심: 댓글 직후에는 팔로우 여부를 조회하지 않습니다.
+    // 팔로워/비팔로워 관계없이 댓글 ID를 사용해 첫 Private Reply DM을 보냅니다.
+    if (campaign.require_follow) {
+      const sent = await sendOpeningPrivateReply(env, commentId, campaign);
       const igsid = String(sent?.recipient_id || commenterIgsid || "");
-      await savePending(env, igsid, username, campaign.id, commentId, true);
-      await updateCampaignLog(env, eventKey, campaign.id, "resource_sent", igsid ? `recipient:${igsid}` : "sent");
+
+      await savePending(env, igsid, username, campaign.id, commentId, false);
+      await updateCampaignLog(
+        env,
+        eventKey,
+        campaign.id,
+        "dm_sent",
+        `recipient:${igsid || "unknown"} / message:${sent?.message_id || "unknown"}`
+      );
+
+      console.log("AUTO DM SENT", {
+        username,
+        commentId,
+        igsid,
+        messageId: sent?.message_id || "",
+        campaignId: campaign.id
+      });
       return;
     }
 
-    let alreadyFollower = false;
-    if (commenterIgsid) {
-      try {
-        const profile = await getFollowerState(env, commenterIgsid);
-        alreadyFollower = profile?.is_user_follow_business === true;
-      } catch (e) {
-        console.warn("pre-DM follower check unavailable", errorMessage(e));
-      }
-    }
+    // 팔로우 확인 옵션을 끈 자동화는 첫 Private Reply에서 자료를 바로 보냅니다.
+    const sent = await sendResourcePrivateReply(env, commentId, campaign);
+    const igsid = String(sent?.recipient_id || commenterIgsid || "");
 
-    if (alreadyFollower) {
-      const sent = await sendResourcePrivateReply(env, commentId, campaign);
-      const igsid = String(sent?.recipient_id || commenterIgsid || "");
-      await savePending(env, igsid, username, campaign.id, commentId, true);
-      await updateCampaignLog(env, eventKey, campaign.id, "resource_sent", "already follower");
-      return;
-    }
+    await savePending(env, igsid, username, campaign.id, commentId, true);
+    await updateCampaignLog(
+      env,
+      eventKey,
+      campaign.id,
+      "resource_sent",
+      `recipient:${igsid || "unknown"} / message:${sent?.message_id || "unknown"}`
+    );
 
-    const opening = await sendOpeningPrivateReply(env, commentId, campaign);
-    const igsid = String(opening?.recipient_id || commenterIgsid || "");
-    await savePending(env, igsid, username, campaign.id, commentId, false);
-    await updateCampaignLog(env, eventKey, campaign.id, "dm_sent", igsid ? `recipient:${igsid}` : "sent");
+    console.log("RESOURCE PRIVATE REPLY SENT", {
+      username,
+      commentId,
+      igsid,
+      messageId: sent?.message_id || "",
+      campaignId: campaign.id
+    });
   } catch (err) {
-    await updateLog(env, eventKey, "error", errorMessage(err).slice(0, 900));
-    console.error("comment automation error", err);
+    const message = errorMessage(err);
+    await updateLog(env, eventKey, "error", message.slice(0, 900));
+    console.error("AUTO DM FAILED", {
+      username,
+      commentId,
+      mediaId,
+      error: message
+    });
   }
 }
 
@@ -277,18 +335,26 @@ async function verifyAndDeliver(env, igsid, campaignId) {
 async function sendOpeningPrivateReply(env, commentId, campaign) {
   const own = await getOwnAccount(env);
   const profileUrl = `https://www.instagram.com/${encodeURIComponent(own.username)}/`;
+
+  // 댓글 Private Reply의 첫 메시지는 가장 단순한 text-only 형식으로 보냅니다.
+  // 사용자가 이 DM에 응답한 뒤에는 기존 processMessagingEvent()가 후속 흐름을 처리합니다.
+  const messageText = [
+    campaign.opening_text,
+    "",
+    `팔로우하기: ${profileUrl}`,
+    "",
+    "팔로우하셨다면 이 DM에 '팔로우 완료'라고 답장해주세요."
+  ].join("\n");
+
   const body = {
     recipient: { comment_id: commentId },
-    message: {
-      text: `${campaign.opening_text}\n\n팔로우하기: ${profileUrl}\n팔로우 후 아래 버튼을 눌러주세요.`,
-      quick_replies: [{ content_type: "text", title: "팔로우 확인", payload: `FOLLOW_CHECK:${campaign.id}` }]
-    }
+    message: { text: messageText }
   };
-  try { return await graphMessage(env, body); }
-  catch (e) {
-    // Some accounts render comment-private-reply quick replies inconsistently; text-only is the documented fallback.
-    return await graphMessage(env, { recipient: { comment_id: commentId }, message: { text: `${campaign.opening_text}\n\n팔로우하기: ${profileUrl}\n팔로우 후 이 DM에 '팔로우 완료'라고 답장해주세요.` } });
-  }
+
+  console.log("PRIVATE REPLY REQUEST", { commentId, campaignId: campaign.id });
+  const result = await graphMessage(env, body);
+  console.log("PRIVATE REPLY SUCCESS", result);
+  return result;
 }
 
 async function sendResourcePrivateReply(env, commentId, campaign) {
