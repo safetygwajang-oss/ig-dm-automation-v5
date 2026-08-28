@@ -1,0 +1,17 @@
+{
+  "name": "ig-dm-automation-v5",
+  "version": "5.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "node --check index.js",
+    "test": "node selftest.mjs",
+    "db:create": "wrangler d1 create ig-dm-automation-db",
+    "secrets": "wrangler secret put IG_ACCESS_TOKEN && wrangler secret put ADMIN_KEY && wrangler secret put VERIFY_TOKEN && wrangler secret put APP_SECRET",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.127.0"
+  }
+}
