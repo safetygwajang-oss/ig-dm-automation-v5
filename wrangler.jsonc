@@ -1,6 +1,5 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // Cloudflare Workers 대시보드/URL에 쓰이는 프로젝트 이름입니다.
   "name": "ig-dm-automation-v5",
   "main": "index.js",
   "compatibility_date": "2026-08-28",
@@ -9,16 +8,11 @@
   "vars": {
     "META_API_VERSION": "v26.0"
   },
-  // 배포가 실패한다면 대부분 이 블록 때문입니다.
-  // 1) `npx wrangler d1 create ig-dm-automation-db` 실행
-  // 2) 콘솔에 출력되는 database_name / database_id 값을 아래에 그대로 붙여넣기
-  // database_id 없이 배포하면 Cloudflare가 "Missing required field database_id"
-  // 오류를 내며 빌드/배포가 그 자리에서 중단됩니다.
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "ig-dm-automation-db",
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+      "database_id": "72471a75-5130-4ea8-a0b5-28c0c942d2f8"
     }
   ]
 }
